@@ -1,0 +1,163 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <signal.h>
+
+#define MAX_INPUT_SIZE 1024
+#define MAX_ARGS 64
+
+// Function to handle signals
+void signalHandler(int signo) {
+    // Handle signals here (if needed)
+    // For example, you can catch Ctrl+C (SIGINT) and do cleanup
+    printf("\nCaught signal: %d\n", signo);
+}
+
+// Function to parse the input command into arguments
+int parseInput(char *input, char *args[]) {
+    int argCount = 0;
+    char *token = strtok(input, " \t\n");
+
+    while (token != NULL && argCount < MAX_ARGS - 1) {
+        args[argCount++] = token;
+        token = strtok(NULL, " \t\n");
+    }
+
+    args[argCount] = NULL; // Null-terminate the argument list
+    return argCount;
+}
+
+// Function to execute a command with piping and redirection
+void executeCommand(char *args[]) {
+    pid_t pid;
+    int status;
+
+    if ((pid = fork()) < 0) {
+        perror("Fork failed");
+        exit(EXIT_FAILURE);
+    } else if (pid == 0) {
+        // Child process
+
+        // Drop privileges in the child process
+        setuid(getuid());
+
+        // Execute the command
+        execvp(args[0], args);
+
+        // If execvp returns, an error occurred
+        perror("Command execution failed");
+        exit(EXIT_FAILURE);
+    } else {
+        // Parent process
+        waitpid(pid, &status, 0);
+    }
+}
+
+// Function to execute a script
+void executeScript(FILE *scriptFile) {
+    char line[MAX_INPUT_SIZE];
+
+    while (fgets(line, sizeof(line), scriptFile) != NULL) {
+        // Remove newline character
+        line[strcspn(line, "\n")] = '\0';
+
+        // Parse the input into arguments
+        char *args[MAX_ARGS];
+        int argCount = parseInput(line, args);
+
+        if (argCount > 0) {
+            // Execute the command
+            executeCommand(args);
+        }
+    }
+}
+
+int main() {
+    char input[MAX_INPUT_SIZE];
+    char *args[MAX_ARGS];
+    int shouldRun = 1;
+
+    // Set up signal handlers
+    signal(SIGINT, signalHandler);
+
+    while (shouldRun) {
+        // Print shell prompt
+        printf("Shell> ");
+        fflush(stdout);
+
+        // Read user input
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            perror("Error reading input");
+            exit(EXIT_FAILURE);
+        }
+
+        // Remove newline character
+        input[strcspn(input, "\n")] = '\0';
+
+        // Exit if the user enters "exit"
+        if (strcmp(input, "exit") == 0) {
+            shouldRun = 0;
+        } else if (strncmp(input, "source", 6) == 0) {
+            // Execute a script using "source" command
+            char *filename = input + 7; // Skip "source " part
+
+            // Input validation for script filename
+            if (strlen(filename) == 0 || strchr(filename, '/') != NULL) {
+                fprintf(stderr, "Invalid script filename.\n");
+                continue;
+            }
+
+            FILE *scriptFile = fopen(filename, "r");
+
+            // Input validation for file existence
+            if (scriptFile == NULL) {
+                perror("Error opening script file");
+                continue;
+            }
+
+            executeScript(scriptFile);
+            fclose(scriptFile);
+        } else {
+            // Parse the input into arguments
+            int argCount = parseInput(input, args);
+
+            if (argCount > 0) {
+                // Validate command arguments
+                for (int i = 0; i < argCount; i++) {
+                    // Ensure that each argument does not contain special characters
+                    if (strpbrk(args[i], "&;|<>()$`\\\"'") != NULL) {
+                        fprintf(stderr, "Invalid character in argument: %s\n", args[i]);
+                        argCount = 0;  // Reset argCount to skip command execution
+                        break;
+                    }
+                }
+
+                // Check for special commands like 'cd'
+                if (argCount > 0) {
+                    if (strcmp(args[0], "cd") == 0) {
+                        if (argCount > 1) {
+                            // Secure handling of directory change
+                            if (chdir(args[1]) != 0) {
+                                perror("cd failed");
+                            }
+                        } else {
+                            fprintf(stderr, "cd: missing argument\n");
+                        }
+                    } else {
+                        // Execute the command
+                        executeCommand(args);
+                    }
+                }
+            }
+        }
+    }
+
+    printf("Shell exiting.\n");
+
+    return 0;
+}
